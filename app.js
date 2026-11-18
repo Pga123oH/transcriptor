@@ -17,7 +17,7 @@ const el = {
   language: $("language"), model: $("model"), models: $("models"),
   chunkMin: $("chunkMin"), concurrency: $("concurrency"), bitrate: $("bitrate"),
   speakers: $("speakers"), timestamps: $("timestamps"),
-  start: $("start"), cancel: $("cancel"),
+  start: $("start"), test: $("test"), cancel: $("cancel"),
   progressCard: $("progressCard"), statusText: $("statusText"), statusPct: $("statusPct"),
   progress: $("progress"), chunkList: $("chunkList"), error: $("error"),
   resultCard: $("resultCard"), copy: $("copy"), download: $("download"), retry: $("retry"),
@@ -420,9 +420,9 @@ function render() {
       msg = `Chunk ${ids.join(" & ")} of ${n} — transcribing` + (r.attempts > 1 ? ` (attempt ${r.attempts})` : "");
     } else if (prepared < n) msg = `Preparing chunk ${prepared + 1} of ${n}…`;
     else msg = `Chunk ${Math.min(done + failed.length + 1, n)} of ${n}`;
-    setStatus(msg, pct);
+    setStatus((job.testOnly ? "Test: " : "") + msg, pct);
   } else {
-    setStatus(failed.length ? `Finished with ${failed.length} failed chunk${failed.length > 1 ? "s" : ""}` : `Done — ${n} chunk${n > 1 ? "s" : ""}`, 100);
+    setStatus((job.testOnly ? `Test of first ${n} chunk${n > 1 ? "s" : ""} — ` : "") + (failed.length ? `Finished with ${failed.length} failed chunk${failed.length > 1 ? "s" : ""}` : `Done — ${n} chunk${n > 1 ? "s" : ""}`), 100);
   }
 
   const warnings = chunks.filter((c) => c.warn).map((c) => `Chunk ${c.index + 1}: ${c.warn}`);
@@ -446,6 +446,7 @@ function persist() {
 
 function setBusy(busy) {
   el.start.disabled = busy;
+  el.test.disabled = busy;
   el.file.disabled = busy;
   el.cancel.hidden = !busy;
   el.retry.disabled = busy;
@@ -485,6 +486,8 @@ async function prepareAudio(file, s, signal) {
 
     job.duration = duration;
     job.chunks = planChunks(duration, s.chunkSec);
+    // Test run: only the first 1/5 of the chunks, rounded up (10 → 2, 11 → 3, 1 → 1).
+    if (job.testOnly) job.chunks = job.chunks.slice(0, Math.ceil(job.chunks.length / 5));
     render();
 
     // 3) cut + encode chunk by chunk (mono, 16 kHz, CBR mp3); transcription starts as soon as chunk 1 is ready
@@ -545,7 +548,7 @@ async function workerLoop(s, apiKey, signal, onlyIdx) {
   }
 }
 
-async function start({ retryOnly = false } = {}) {
+async function start({ retryOnly = false, testOnly = false } = {}) {
   const apiKey = el.apiKey.value.trim();
   if (!apiKey) { alert("Paste your OpenRouter API key first."); el.apiKey.focus(); return; }
   store.set(LS.key, apiKey);
@@ -560,7 +563,7 @@ async function start({ retryOnly = false } = {}) {
   } else {
     const file = el.file.files?.[0];
     if (!file) { alert("Choose an audio file first."); return; }
-    job = { fileName: file.name, file, settings: readSettings(), chunks: [], running: true, prepDone: false };
+    job = { fileName: file.name, file, settings: readSettings(), chunks: [], running: true, prepDone: false, testOnly };
   }
 
   document.getElementById("restoredNote")?.remove();
@@ -661,6 +664,7 @@ el.file.addEventListener("change", () => {
   el.fileInfo.textContent = info;
 });
 el.start.addEventListener("click", () => start());
+el.test.addEventListener("click", () => start({ testOnly: true }));
 el.retry.addEventListener("click", () => start({ retryOnly: true }));
 el.cancel.addEventListener("click", cancel);
 
