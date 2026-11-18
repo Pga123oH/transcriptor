@@ -7,12 +7,12 @@ Everything runs in your browser: the audio is split and converted locally with f
 ## How it works
 
 1. The file (m4a, mp3, wav, ogg, WhatsApp .opus, …) is opened in the browser with ffmpeg.wasm.
-2. It is cut into chunks (default **10 minutes**) with a 5-second overlap. Each chunk is re-encoded to mono, 16 kHz, 32 kbps MP3 (about 2.4 MB, or 3.2 MB as base64).
-3. Each chunk is sent to `https://openrouter.ai/api/v1/chat/completions` as an `input_audio` part, one or two at a time. A failed chunk is retried up to 3 times with backoff.
+2. It is cut into chunks (default **5 minutes**) with a 5-second overlap. Each chunk is re-encoded to mono, 16 kHz, 32 kbps MP3 (about 1.2 MB, or 1.6 MB as base64).
+3. Each chunk is sent to `https://openrouter.ai/api/v1/chat/completions` as an `input_audio` part, two at a time by default. A failed chunk is retried up to 3 times with backoff.
 4. The results are stitched together. Words repeated in the overlap are trimmed, and a `[hh:mm:ss]` marker starts each chunk.
 5. You can copy the transcript or download it as a .txt file. The last transcript is also kept in localStorage in case the tab reloads.
 
-## Why 10-minute chunks
+## Chunk length
 
 Different models accept different amounts of audio, so the default uses the smallest limit that matters:
 
@@ -23,7 +23,9 @@ Different models accept different amounts of audio, so the default uses the smal
 | OpenRouter: no global audio cap, but the provider has to answer before the timeout; long files should be split | OpenRouter audio/STT docs |
 | **Output tokens**: each chunk's transcript must fit in the model's output limit (8k tokens on some models). 10 min of fast Indonesian speech is ~1.5–2k words ≈ 3–5k tokens | estimate |
 
-Ten minutes keeps every chunk well below all of these limits: 25 minutes, 20 MB, and 8k output tokens. Shorter chunks also make models less likely to summarise or drift. You can change the length in **More settings**. If a chunk's output gets cut off, the app flags it and suggests a shorter chunk length.
+Any length up to ~10 minutes is under all of these limits. The default is 5 minutes because in real tests Gemini sometimes got stuck repeating one phrase on 10-minute chunks of noisy audio (a known Gemini failure). Shorter chunks loop less, and the cost is the same since audio is billed per second.
+
+**Repetition loops:** the app checks every result for a phrase repeated back to back. If it finds one (or the output was cut off), it splits that chunk in half and transcribes both halves again, down to 1 minute. If a 1-minute piece still loops, the repeats are removed and the chunk is flagged. The app also leaves temperature at the model default, because Google notes low temperature makes Gemini loop more, and caps output tokens so a loop can't run up the bill. You can change the length in **More settings**. If a chunk's output gets cut off, the app flags it and suggests a shorter chunk length.
 
 ## Hosting on GitHub Pages
 

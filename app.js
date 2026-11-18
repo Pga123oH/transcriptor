@@ -6,6 +6,7 @@ const MODELS_URL = "https://openrouter.ai/api/v1/models";
 const OVERLAP_SEC = 5;          // each chunk starts 5 s before its nominal start
 const MIN_TAIL_SEC = 30;        // a final piece shorter than this is merged into the previous chunk
 const MAX_RETRIES = 3;          // retries after the first attempt
+const MIN_SPLIT_SEC = 60;       // a looping chunk longer than this is split in half and redone
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const LS = { key: "transcriptor:apiKey", settings: "transcriptor:settings", last: "transcriptor:last" };
 
@@ -73,8 +74,8 @@ function readSettings() {
   return {
     language: el.language.value.trim() || "Indonesian",
     model: el.model.value.trim() || "google/gemini-2.5-flash",
-    chunkSec: Math.min(30, Math.max(1, Number(el.chunkMin.value) || 10)) * 60,
-    concurrency: Number(el.concurrency.value) === 2 ? 2 : 1,
+    chunkSec: Math.min(30, Math.max(1, Number(el.chunkMin.value) || 5)) * 60,
+    concurrency: Number(el.concurrency.value) === 1 ? 1 : 2,
     bitrate: Number(el.bitrate.value) === 48 ? 48 : 32,
     speakers: el.speakers.checked,
     timestamps: el.timestamps.checked,
@@ -82,7 +83,7 @@ function readSettings() {
 }
 function saveSettings() {
   const s = readSettings();
-  store.set(LS.settings, JSON.stringify({ ...s, chunkMin: s.chunkSec / 60 }));
+  store.set(LS.settings, JSON.stringify({ ...s, chunkMin: s.chunkSec / 60, v: 2 }));
 }
 function loadSettings() {
   const key = store.get(LS.key);
@@ -90,6 +91,7 @@ function loadSettings() {
   try {
     const s = JSON.parse(store.get(LS.settings) || "null");
     if (!s) return;
+    if ((s.v || 1) < 2) { delete s.chunkMin; delete s.concurrency; } // new defaults after the loop fix
     if (s.language) el.language.value = s.language;
     if (s.model) el.model.value = s.model;
     if (s.chunkMin) el.chunkMin.value = s.chunkMin;
@@ -202,7 +204,9 @@ class HttpError extends Error {
 async function callOpenRouter(chunk, s, apiKey, signal) {
   const body = {
     model: s.model,
-    temperature: 0,
+    // No temperature override: Gemini loops more at low temperature.
+    // Cap output so a runaway loop stops early (~1,500 tokens per audio minute is several times normal speech).
+    max_tokens: Math.round(4000 + 1500 * (chunkSeconds(chunk) / 60)),
     messages: [{
       role: "user",
       content: [
@@ -272,6 +276,68 @@ async function transcribeChunk(chunk, s, apiKey, signal) {
     }
   }
   throw new Error("unreachable");
+}
+
+// ---------- repetition-loop detection ----------
+/** Finds a phrase (1–12 words) repeated back to back many times. Returns {start,end} char range or null. */
+export function findLoop(text) {
+  const toks = [...text.matchAll(/\S+/g)].map((m) => ({ w: norm(m[0]), s: m.index, e: m.index + m[0].length })).filter((t) => t.w);
+  const w = toks.map((t) => t.w);
+  for (let n = 1; n <= 12; n++) {
+    const minReps = n === 1 ? 10 : n === 2 ? 7 : 5; // "sampai sampai sampai" is fine; 10× is not
+    for (let i = 0; i + 2 * n <= w.length; i++) {
+      let reps = 1;
+      let j = i + n;
+      while (j + n <= w.length && w.slice(j, j + n).every((x, k) => x === w[i + k])) { reps++; j += n; }
+      if (reps >= minReps && reps * n >= 25) return { start: toks[i].s, keepEnd: toks[i + n - 1].e, end: toks[j - 1].e, reps };
+      if (reps > 1) i = j - n; // skip past this run
+    }
+  }
+  return null;
+}
+/** Collapses every detected loop to a single copy plus a note. */
+export function collapseLoops(text) {
+  for (let guard = 0; guard < 20; guard++) {
+    const l = findLoop(text);
+    if (!l) break;
+    text = text.slice(0, l.keepEnd) + ` [model repeated this ${l.reps}× — removed; audio here may be missing]` + text.slice(l.end);
+  }
+  return text;
+}
+function chunkSeconds(c) {
+  return (c.end ?? job?.duration ?? c.start + 600) - c.start;
+}
+
+/** Cut a chunk's audio in two (with the usual overlap) and put both halves in its place. */
+async function splitChunk(c) {
+  const f = await getFFmpeg();
+  const total = chunkSeconds(c);
+  const mid = c.nominal + Math.round((c.start + total - c.nominal) / 2);
+  const relMid = mid - c.start;
+  const id = Math.random().toString(36).slice(2);
+  await f.writeFile(`/split${id}.mp3`, c.audio);
+  const cut = async (from, dur, out) => {
+    const args = ["-hide_banner", "-ss", String(from), "-i", `/split${id}.mp3`];
+    if (dur != null) args.push("-t", String(dur));
+    args.push("-c", "copy", out);
+    await run(f, args);
+    const data = await f.readFile(out);
+    await safeDelete(f, out);
+    return data;
+  };
+  try {
+    const a = await cut(0, relMid, `/a${id}.mp3`);
+    const b = await cut(relMid - OVERLAP_SEC, null, `/b${id}.mp3`);
+    const base = { status: "ready", text: "", error: "", warn: "", attempts: 0, splitDepth: (c.splitDepth || 0) + 1 };
+    const first = { ...base, nominal: c.nominal, start: c.start, end: mid, audio: a };
+    const second = { ...base, nominal: mid, start: mid - OVERLAP_SEC, end: c.end, audio: b };
+    const i = job.chunks.indexOf(c);
+    job.chunks.splice(i, 1, first, second);
+    job.chunks.forEach((x, k) => { x.index = k; });
+    return [first, second];
+  } finally {
+    await safeDelete(f, `/split${id}.mp3`);
+  }
 }
 
 // ---------- stitching ----------
@@ -446,19 +512,29 @@ async function prepareAudio(file, s, signal) {
 async function workerLoop(s, apiKey, signal, onlyIdx) {
   for (;;) {
     if (signal.aborted) return;
-    const next = job.chunks.find((c) => c.status === "ready" && (!onlyIdx || onlyIdx.has(c.index)));
+    const next = job.chunks.find((c) => c.status === "ready" && (!onlyIdx || onlyIdx.has(c)));
     if (!next) {
-      const waiting = job.chunks.some((c) => (c.status === "pending" || c.status === "preparing") && (!onlyIdx || onlyIdx.has(c.index)));
-      if (!waiting || job.prepDone) return;
+      const waiting = job.chunks.some((c) => (c.status === "pending" || c.status === "preparing" || c.status === "running") && (!onlyIdx || onlyIdx.has(c)));
+      if (!waiting) return;
       await new Promise((r) => { job.wake = r; setTimeout(r, 500); });
       continue;
     }
     next.status = "running"; next.error = ""; next.warn = ""; render();
     try {
       const r = await transcribeChunk(next, s, apiKey, signal);
-      next.text = r.text;
+      const looped = !!findLoop(r.text);
+      if ((looped || r.truncated) && chunkSeconds(next) > MIN_SPLIT_SEC && next.audio) {
+        // The model got stuck repeating itself (or ran out of output). Redo this part as two shorter pieces.
+        next.status = "preparing"; next.error = "model repeated itself — splitting into shorter pieces"; render();
+        const parts = await splitChunk(next);
+        if (onlyIdx) parts.forEach((p) => onlyIdx.add(p));
+        render();
+        continue;
+      }
+      next.text = looped ? collapseLoops(r.text) : r.text;
       next.status = "done";
-      next.warn = r.truncated ? "output was cut off by the model's length limit — lower the chunk length and retry" : "";
+      next.warn = looped ? "model got stuck repeating a phrase even on a short piece — repeats removed, some words may be missing"
+        : r.truncated ? "output was cut off by the model's length limit — lower the chunk length and retry" : "";
       if (!r.text) next.warn = "model returned no speech for this chunk";
     } catch (e) {
       if (signal.aborted) { next.status = "ready"; return; }
@@ -479,8 +555,8 @@ async function start({ retryOnly = false } = {}) {
   if (retryOnly) {
     if (!job) return;
     job.settings = { ...readSettings(), chunkSec: job.settings.chunkSec, bitrate: job.settings.bitrate, timestamps: el.timestamps.checked };
-    onlyIdx = new Set(job.chunks.filter((c) => c.status === "failed" && c.audio).map((c) => c.index));
-    for (const c of job.chunks) if (onlyIdx.has(c.index)) { c.status = "ready"; c.error = ""; }
+    onlyIdx = new Set(job.chunks.filter((c) => c.status === "failed" && c.audio));
+    for (const c of onlyIdx) { c.status = "ready"; c.error = ""; }
   } else {
     const file = el.file.files?.[0];
     if (!file) { alert("Choose an audio file first."); return; }
@@ -627,4 +703,4 @@ try {
 } catch { /* ignore */ }
 
 // exposed for tests
-window.__transcriber = { trimOverlap, planChunks };
+window.__transcriber = { trimOverlap, planChunks, findLoop, collapseLoops };
