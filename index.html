@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <title>Audio Transcriber</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>Audio Transcriber</h1>
+    <p class="muted">Long voice notes → full transcript. Runs in your browser; audio goes only to OpenRouter.</p>
+  </header>
+
+  <section class="card">
+    <label for="apiKey">OpenRouter API key</label>
+    <div class="row">
+      <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-or-...">
+      <button id="toggleKey" type="button" class="ghost" aria-label="Show key">Show</button>
+    </div>
+    <p class="hint">Saved in this browser's localStorage only. <button id="clearKey" type="button" class="link">Forget key</button></p>
+  </section>
+
+  <section class="card">
+    <label for="file">Audio file</label>
+    <input id="file" type="file" accept="audio/*,.m4a,.mp3,.wav,.ogg,.opus,.oga,.aac,.flac,.webm,.amr,.3gp,.mp4">
+    <p id="fileInfo" class="hint"></p>
+
+    <div class="grid">
+      <div>
+        <label for="language">Language</label>
+        <input id="language" list="languages" value="Indonesian">
+        <datalist id="languages">
+          <option value="Indonesian"><option value="English"><option value="Javanese">
+          <option value="Sundanese"><option value="Malay"><option value="Indonesian and English (mixed)">
+        </datalist>
+      </div>
+      <div>
+        <label for="model">Model</label>
+        <input id="model" list="models" spellcheck="false" value="google/gemini-2.5-flash">
+        <datalist id="models"></datalist>
+      </div>
+    </div>
+
+    <details>
+      <summary>More settings</summary>
+      <div class="grid">
+        <div>
+          <label for="chunkMin">Chunk length (minutes)</label>
+          <input id="chunkMin" type="number" min="1" max="30" step="1" value="10">
+        </div>
+        <div>
+          <label for="concurrency">Parallel requests</label>
+          <select id="concurrency"><option value="1">1 (safest)</option><option value="2">2</option></select>
+        </div>
+        <div>
+          <label for="bitrate">Chunk bitrate</label>
+          <select id="bitrate"><option value="32">32 kbps</option><option value="48">48 kbps</option></select>
+        </div>
+      </div>
+      <label class="check"><input id="speakers" type="checkbox"> Label speakers (Speaker 1, Speaker 2, …)</label>
+      <label class="check"><input id="timestamps" type="checkbox" checked> Add [hh:mm:ss] marker at each chunk</label>
+    </details>
+
+    <div class="actions">
+      <button id="start" type="button" class="primary">Transcribe</button>
+      <button id="cancel" type="button" class="ghost" hidden>Cancel</button>
+    </div>
+  </section>
+
+  <section id="progressCard" class="card" hidden>
+    <div class="status-line">
+      <span id="statusText">Starting…</span>
+      <span id="statusPct" class="muted"></span>
+    </div>
+    <progress id="progress" max="100" value="0"></progress>
+    <ol id="chunkList" class="chunks"></ol>
+    <p id="error" class="error" hidden></p>
+  </section>
+
+  <section id="resultCard" class="card" hidden>
+    <div class="actions wrap">
+      <button id="copy" type="button" class="primary">Copy all</button>
+      <button id="download" type="button">Download .txt</button>
+      <button id="retry" type="button" hidden>Retry failed chunks</button>
+    </div>
+    <pre id="transcript" class="transcript"></pre>
+  </section>
+
+  <footer class="muted small">Keep this tab open and the screen on while it works. Large files on phones can run out of memory — use a desktop browser if that happens.</footer>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>
