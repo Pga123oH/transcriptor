@@ -62,6 +62,7 @@ const el = {
   cmpModels: $("cmpModels"), cmpAdd: $("cmpAdd"), cmpAddBtn: $("cmpAddBtn"),
   cmpRun: $("cmpRun"), cmpCancel: $("cmpCancel"), cmpStatus: $("cmpStatus"),
   cmpResults: $("cmpResults"), cmpAudio: $("cmpAudio"), cmpCards: $("cmpCards"),
+  cmpSerial: $("cmpSerial"), cmpRankWrap: $("cmpRankWrap"), cmpRank: $("cmpRank"), cmpReport: $("cmpReport"),
 };
 
 // ---------- storage helpers (never throw) ----------
@@ -243,6 +244,8 @@ class HttpError extends Error {
 
 async function postJSON(url, body, apiKey, signal) {
   const sig = combineSignals(signal, REQUEST_TIMEOUT_MS);
+  const payload = JSON.stringify(body);
+  const tSend = performance.now();
   let res;
   try {
     res = await fetch(url, {
@@ -252,7 +255,7 @@ async function postJSON(url, body, apiKey, signal) {
         "Content-Type": "application/json",
         "X-Title": "Audio Transcriber",
       },
-      body: JSON.stringify(body),
+      body: payload,
       signal: sig.signal,
     });
   } catch (e) {
@@ -260,8 +263,10 @@ async function postJSON(url, body, apiKey, signal) {
     if (signal.aborted) throw e;
     throw new HttpError(e?.name === "TimeoutError" || e?.name === "AbortError" ? "Request timed out" : "Network error: " + (e?.message || e), 0, true);
   }
+  const tHeaders = performance.now();
   let text = "";
   try { text = await res.text(); } finally { sig.done(); }
+  const tEnd = performance.now();
   let json = null;
   try { json = JSON.parse(text); } catch { /* non-JSON */ }
 
@@ -277,7 +282,10 @@ async function postJSON(url, body, apiKey, signal) {
     else if (status === 413) hint = " — chunk too large; lower the chunk length.";
     throw new HttpError(`HTTP ${status}: ${msg}${hint}`, status, retryable, Number.isFinite(ra) && ra > 0 ? ra * 1000 : 0);
   }
-  return json || {};
+  json = json || {};
+  // upload + model processing happen before the response headers arrive; reading the body is the download
+  json.__timing = { waitMs: tHeaders - tSend, readMs: tEnd - tHeaders, uploadBytes: payload.length, provider: json.provider || res.headers.get("x-openrouter-provider") || "" };
+  return json;
 }
 
 async function callOpenRouter(chunk, s, apiKey, signal) {
@@ -291,7 +299,7 @@ async function callTranscription(chunk, s, apiKey, signal) {
   if (code) body.language = code;
   const json = await postJSON(STT_URL, body, apiKey, signal);
   const text = String(json.text ?? json.transcript ?? "").trim();
-  return { text, truncated: false, cost: json.usage?.cost };
+  return { text, truncated: false, cost: json.usage?.cost, timing: json.__timing };
 }
 
 /** Audio-capable chat models (Gemini etc.): prompt + input_audio part */
@@ -316,14 +324,19 @@ async function callChat(chunk, s, apiKey, signal) {
   content = cleanModelText(content);
   const finish = choice?.finish_reason || choice?.native_finish_reason || "";
   if (!content && finish !== "stop") throw new HttpError("Model returned an empty response", 200, true);
-  return { text: content, truncated: /length|max_tokens/i.test(String(finish)), cost: json.usage?.cost };
+  return { text: content, truncated: /length|max_tokens/i.test(String(finish)), cost: json.usage?.cost, timing: json.__timing,
+    outTokens: json.usage?.completion_tokens, reasoningTokens: json.usage?.completion_tokens_details?.reasoning_tokens };
 }
 
 async function transcribeChunk(chunk, s, apiKey, signal, onUpdate = render) {
+  const t0 = performance.now();
+  let retryWaitMs = 0;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     chunk.attempts = attempt + 1;
     try {
       const r = await callOpenRouter(chunk, s, apiKey, signal);
+      r.telemetry = { ...(r.timing || {}), totalMs: performance.now() - t0, attempts: attempt + 1, retryWaitMs };
+      chunk.ms = r.telemetry.totalMs;
       return r;
     } catch (e) {
       if (signal.aborted) throw e;
@@ -331,6 +344,7 @@ async function transcribeChunk(chunk, s, apiKey, signal, onUpdate = render) {
       const wait = e.retryAfterMs || 2000 * 2 ** attempt + Math.random() * 1000;
       chunk.error = `${e.message} — retrying (${attempt + 1}/${MAX_RETRIES})…`;
       onUpdate();
+      retryWaitMs += wait;
       await sleep(wait, signal);
     }
   }
@@ -462,7 +476,7 @@ function render() {
     const icon = { pending: "", preparing: "…", ready: "", running: "⟳", done: "✓", failed: "✗" }[c.status] || "";
     li.textContent = `#${c.index + 1} ${range} ${icon}`.trim();
     li.className = c.status === "done" && c.warn ? "warn" : c.status;
-    li.title = c.error || c.warn || c.status;
+    li.title = (c.error || c.warn || c.status) + (c.ms ? ` · ${(c.ms / 1000).toFixed(1)} s` : "");
     el.chunkList.appendChild(li);
   }
   const done = chunks.filter((c) => c.status === "done").length;
@@ -480,8 +494,9 @@ function render() {
     } else if (prepared < n) msg = `Preparing chunk ${prepared + 1} of ${n}…`;
     else msg = `Chunk ${Math.min(done + failed.length + 1, n)} of ${n}`;
     setStatus((job.testOnly ? "Test: " : "") + msg, pct);
+    showElapsed();
   } else {
-    setStatus((job.testOnly ? `Test of first ${n} chunk${n > 1 ? "s" : ""} — ` : "") + (failed.length ? `Finished with ${failed.length} failed chunk${failed.length > 1 ? "s" : ""}` : `Done — ${n} chunk${n > 1 ? "s" : ""}`), 100);
+    setStatus((job.testOnly ? `Test of first ${n} chunk${n > 1 ? "s" : ""} — ` : "") + (failed.length ? `Finished with ${failed.length} failed chunk${failed.length > 1 ? "s" : ""}` : `Done — ${n} chunk${n > 1 ? "s" : ""}`) + timingSummary(), 100);
   }
 
   const warnings = chunks.filter((c) => c.warn).map((c) => `Chunk ${c.index + 1}: ${c.warn}`);
@@ -494,6 +509,26 @@ function render() {
   el.transcript.textContent = buildTranscript();
   el.retry.hidden = job.running || failed.length === 0 || failed.some((c) => !c.audio);
   persist();
+}
+
+function fmtDur(ms) {
+  const sec = Math.round(ms / 1000);
+  return sec < 60 ? `${sec} s` : `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+}
+function showElapsed() {
+  if (!job?.t0) return;
+  el.statusPct.textContent = `${Math.round(el.progress.value)}% · ${fmtDur(performance.now() - job.t0)}`;
+}
+/** " in 4:31 · 13× realtime · avg 21 s per chunk" for the finished run */
+function timingSummary() {
+  if (!job?.elapsedMs) return "";
+  const done = job.chunks.filter((c) => c.status === "done" && c.ms);
+  const last = job.chunks[job.chunks.length - 1];
+  const audioSec = job.testOnly ? (last?.end ?? job.duration ?? 0) : (job.duration ?? 0);
+  const parts = [` in ${fmtDur(job.elapsedMs)}`];
+  if (audioSec && !job.retryRun) parts.push(`${(audioSec / (job.elapsedMs / 1000)).toFixed(1)}× realtime`);
+  if (done.length) parts.push(`avg ${(done.reduce((a, c) => a + c.ms, 0) / done.length / 1000).toFixed(1)} s per chunk`);
+  return parts.join(" · ");
 }
 
 function persist() {
@@ -630,6 +665,11 @@ async function start({ retryOnly = false, testOnly = false } = {}) {
   const abort = new AbortController();
   job.abort = abort;
   job.running = true;
+  job.t0 = performance.now();
+  job.elapsedMs = 0;
+  job.retryRun = retryOnly;
+  clearInterval(job.timer);
+  job.timer = setInterval(showElapsed, 1000);
   setBusy(true);
   el.error.hidden = true;
   el.resultCard.hidden = true;
@@ -660,6 +700,8 @@ async function start({ retryOnly = false, testOnly = false } = {}) {
       el.error.hidden = false;
       el.error.textContent = friendlyError(e);
       job.running = false;
+      clearInterval(job.timer);
+      job.elapsedMs = performance.now() - job.t0;
       setBusy(false);
       releaseWakeLock();
       if (job.chunks.some((c) => c.status === "done")) { el.resultCard.hidden = false; el.transcript.textContent = buildTranscript(); }
@@ -668,6 +710,8 @@ async function start({ retryOnly = false, testOnly = false } = {}) {
     }
   }
   job.running = false;
+  clearInterval(job.timer);
+  job.elapsedMs = performance.now() - job.t0;
   setBusy(false);
   releaseWakeLock();
   if (abort.signal.aborted) {
@@ -739,7 +783,7 @@ for (const b of el.tabs) b.addEventListener("click", () => {
 });
 
 // ---------- comparison ----------
-const cmp = { running: false, abort: null, audioUrl: null, selected: new Set(), extra: [] };
+const cmp = { running: false, abort: null, audioUrl: null, selected: new Set(), extra: [], rows: [], meta: null };
 try {
   const saved = JSON.parse(store.get(LS.cmp) || "null");
   if (saved) { cmp.selected = new Set(saved.selected || []); cmp.extra = saved.extra || []; }
@@ -781,7 +825,7 @@ function cmpCard(model) {
   const card = document.createElement("article");
   card.className = "cmp-card";
   const m = catalog.get(model) || { name: model };
-  card.innerHTML = `<h3></h3><div class="mid"></div><div class="meta">Waiting…</div><div class="warn" hidden></div><div class="err" hidden></div><pre class="transcript" hidden></pre>
+  card.innerHTML = `<h3></h3><div class="mid"></div><div class="meta">Waiting…</div><dl hidden></dl><div class="warn" hidden></div><div class="err" hidden></div><pre class="transcript" hidden></pre>
     <div class="actions wrap" hidden><button type="button" data-act="copy">Copy</button><button type="button" data-act="use">Use this model</button></div>`;
   card.querySelector("h3").textContent = m.name;
   card.querySelector(".mid").textContent = model;
@@ -795,6 +839,52 @@ function cmpCard(model) {
   });
   el.cmpCards.appendChild(card);
   return card;
+}
+
+function sortedRows() {
+  return cmp.rows.filter((r) => r.status !== "running" && r.status !== "cancelled")
+    .sort((a, b) => (a.status === "failed") - (b.status === "failed") || a.totalS - b.totalS);
+}
+
+function renderRanking() {
+  const sorted = sortedRows();
+  if (!sorted.length) return;
+  const t = el.cmpRank;
+  t.innerHTML = "<thead><tr><th>#</th><th>Model</th><th class=num>Total</th><th class=num>Realtime</th><th class=num>Server</th><th class=num>Words</th><th>Note</th></tr></thead>";
+  const tb = document.createElement("tbody");
+  sorted.forEach((r, i) => {
+    const tr = document.createElement("tr");
+    if (r.status === "failed") tr.className = "bad";
+    const cells = r.status === "failed"
+      ? [String(i + 1), r.name, `${r.totalS.toFixed(1)} s`, "—", "—", "—", "failed"]
+      : [String(i + 1), r.name, `${r.totalS.toFixed(1)} s`, `${r.rtf.toFixed(1)}×`, `${r.serverS.toFixed(1)} s`, String(r.words),
+        [r.status === "loop" ? "looped" : "", r.attempts > 1 ? `${r.attempts} tries` : ""].filter(Boolean).join(", ")];
+    cells.forEach((c, k) => { const td = document.createElement("td"); td.textContent = c; if (k >= 2 && k <= 5) td.className = "num"; tr.appendChild(td); });
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb);
+  el.cmpRankWrap.hidden = false;
+}
+
+function buildReport() {
+  const m = cmp.meta || {};
+  const rows = sortedRows();
+  const f = (x, d = 2) => (x == null || Number.isNaN(x) ? "" : Number(x).toFixed(d));
+  const lines = [
+    "# Transcription model comparison",
+    `Snippet ${fmtTime(m.from || 0)}–${fmtTime((m.from || 0) + (m.realLen || 0))} (${m.realLen} s), language ${m.language}, ` +
+      `${m.serial ? "one model at a time" : "3 models in parallel"}, ${m.when ? m.when.toISOString() : ""}`,
+    "",
+    "| # | Model | Total s | × realtime | Server s | Download s | Attempts | Words | Output tok | Cost $ | Provider | Note |",
+    "|---|---|---|---|---|---|---|---|---|---|---|---|",
+  ];
+  rows.forEach((r, i) => {
+    lines.push(`| ${i + 1} | ${r.model} | ${f(r.totalS)} | ${f(r.rtf, 1)} | ${f(r.serverS)} | ${f(r.readS)} | ${r.attempts ?? ""} | ${r.words ?? ""} | ` +
+      `${r.outTokens ?? ""}${r.reasoningTokens ? ` (${r.reasoningTokens} thinking)` : ""} | ${r.cost != null ? f(r.cost, 5) : ""} | ${r.provider || ""} | ` +
+      `${r.status === "failed" ? "FAILED: " + (r.error || "").replace(/\|/g, "/") : r.status === "loop" ? "looped" : ""} |`);
+  });
+  for (const r of rows) if (r.text) lines.push("", `## ${r.model}`, "", r.text);
+  return lines.join("\n");
 }
 
 async function runComparison() {
@@ -817,6 +907,8 @@ async function runComparison() {
   el.cmpCancel.hidden = false;
   el.cmpCards.innerHTML = "";
   el.cmpResults.hidden = true;
+  el.cmpRankWrap.hidden = true;
+  cmp.rows = [];
   await requestWakeLock();
 
   try {
@@ -852,15 +944,35 @@ async function runComparison() {
         const card = cards.get(model);
         const meta = card.querySelector(".meta"), warn = card.querySelector(".warn"), err = card.querySelector(".err"), pre = card.querySelector("pre");
         const piece = { audio, start: 0, end: realLen, attempts: 0, error: "" };
+        const row = { model, name: (catalog.get(model) || { name: model }).name, status: "running" };
+        cmp.rows.push(row);
         meta.textContent = "Transcribing…";
         const t0 = performance.now();
+        const tick = setInterval(() => { if (!piece.error) meta.textContent = `Transcribing… ${((performance.now() - t0) / 1000).toFixed(0)} s`; }, 1000);
         try {
           const r = await transcribeChunk(piece, { ...settings, model }, apiKey, signal, () => { meta.textContent = piece.error; });
-          const secs = (performance.now() - t0) / 1000;
+          clearInterval(tick);
+          const t = r.telemetry;
           const loop = findLoop(r.text);
           const text = loop ? collapseLoops(r.text) : r.text;
           const words = (text.match(/\S+/g) || []).length;
-          meta.textContent = [`${secs.toFixed(1)} s`, `${words} words`, r.cost != null ? `$${Number(r.cost).toFixed(4)}` : null].filter(Boolean).join(" · ");
+          Object.assign(row, { status: loop ? "loop" : "ok", totalS: t.totalMs / 1000, rtf: realLen / (t.totalMs / 1000), serverS: t.waitMs / 1000,
+            readS: t.readMs / 1000, attempts: t.attempts, retryS: t.retryWaitMs / 1000, provider: t.provider, words, cost: r.cost,
+            outTokens: r.outTokens, reasoningTokens: r.reasoningTokens, text });
+          meta.textContent = [`${row.totalS.toFixed(1)} s`, `${row.rtf.toFixed(1)}× realtime`, `${words} words`, r.cost != null ? `$${Number(r.cost).toFixed(4)}` : null].filter(Boolean).join(" · ");
+          const dl = card.querySelector("dl");
+          const facts = [
+            ["Total", `${row.totalS.toFixed(2)} s`],
+            ["Server", `${row.serverS.toFixed(2)} s (upload ${(t.uploadBytes / 1024).toFixed(0)} KB + processing)`],
+            ["Download", `${row.readS.toFixed(2)} s`],
+            ["Speed", `${row.rtf.toFixed(1)}× realtime · ${(words / row.totalS).toFixed(0)} words/s`],
+            ["Attempts", t.attempts > 1 ? `${t.attempts} (waited ${row.retryS.toFixed(1)} s between retries)` : "1"],
+            t.provider ? ["Provider", t.provider] : null,
+            r.outTokens != null ? ["Output tokens", `${r.outTokens}${r.reasoningTokens ? ` (${r.reasoningTokens} thinking)` : ""}`] : null,
+          ].filter(Boolean);
+          dl.innerHTML = "";
+          for (const [k, v] of facts) { const dt = document.createElement("dt"); dt.textContent = k; const dd = document.createElement("dd"); dd.textContent = v; dl.append(dt, dd); }
+          dl.hidden = false;
           const warns = [];
           if (loop) warns.push(`Got stuck repeating a phrase (${loop.reps}×) — repeats removed.`);
           if (r.truncated) warns.push("Output was cut off.");
@@ -869,15 +981,18 @@ async function runComparison() {
           pre.hidden = !text; pre.textContent = text;
           card.querySelector(".actions").hidden = false;
         } catch (e) {
-          if (signal.aborted) { meta.textContent = "Cancelled"; return; }
+          clearInterval(tick);
+          if (signal.aborted) { meta.textContent = "Cancelled"; row.status = "cancelled"; return; }
           card.classList.add("failed");
-          meta.textContent = "Failed";
+          meta.textContent = `Failed after ${((performance.now() - t0) / 1000).toFixed(1)} s`;
           err.hidden = false; err.textContent = friendlyError(e);
+          Object.assign(row, { status: "failed", totalS: (performance.now() - t0) / 1000, error: friendlyError(e) });
         }
-        finished++; status();
+        finished++; status(); renderRanking();
       }
     };
-    await Promise.all([worker(), worker(), worker()]);
+    cmp.meta = { from, realLen, language: settings.language, serial: el.cmpSerial.checked, when: new Date() };
+    await Promise.all(Array.from({ length: el.cmpSerial.checked ? 1 : 3 }, worker));
     if (signal.aborted) el.cmpStatus.textContent = "Cancelled";
     else el.cmpStatus.textContent += " — read them while listening to the snippet above, then tap “Use this model” on the best one.";
   } catch (e) {
@@ -892,6 +1007,12 @@ async function runComparison() {
 }
 
 el.cmpRun.addEventListener("click", runComparison);
+el.cmpReport.addEventListener("click", async () => {
+  const text = buildReport();
+  try { await navigator.clipboard.writeText(text); el.cmpReport.textContent = "Copied ✓ — paste it anywhere"; }
+  catch { el.cmpReport.textContent = "Couldn't copy"; }
+  setTimeout(() => (el.cmpReport.textContent = "Copy report"), 2000);
+});
 el.cmpCancel.addEventListener("click", () => { cmp.abort?.abort(); });
 el.cmpAddBtn.addEventListener("click", () => {
   const id = el.cmpAdd.value.trim();

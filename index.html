@@ -124,6 +124,7 @@
       <input id="cmpAdd" list="models" spellcheck="false" placeholder="Add another model id, e.g. provider/model">
       <button id="cmpAddBtn" type="button">Add</button>
     </div>
+    <label class="check"><input id="cmpSerial" type="checkbox"> One model at a time (slower overall, fairer speed numbers)</label>
     <div class="actions">
       <button id="cmpRun" type="button" class="primary">Compare</button>
       <button id="cmpCancel" type="button" class="ghost" hidden>Cancel</button>
@@ -134,6 +135,12 @@
   <section id="cmpResults" class="card" hidden>
     <label>Snippet (listen while you compare)</label>
     <audio id="cmpAudio" controls preload="metadata"></audio>
+    <div id="cmpRankWrap" hidden>
+      <label>Speed ranking</label>
+      <div class="table-scroll"><table id="cmpRank" class="rank"></table></div>
+      <p class="hint">Total = from sending until the transcript arrived, including retries. Realtime = seconds of audio handled per second (higher is faster). Server = upload + processing until the reply started.</p>
+      <div class="actions wrap"><button id="cmpReport" type="button">Copy report</button></div>
+    </div>
     <div id="cmpCards" class="cmp-cards"></div>
   </section>
   </div>

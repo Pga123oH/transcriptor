@@ -58,6 +58,8 @@ There is no `package.json`, bundler or framework, and that's intentional: the si
   - Cuts one snippet with ffmpeg (default 2 min; start time and 1/2/3 min are settable) and sends it to every ticked model, 3 at a time.
   - Shows one card per model with time, word count, cost, loop warning, Copy, and "Use this model" (copies the model ID to the Transcribe tab).
   - Has an audio player for the snippet.
+  - **Speed telemetry**: `postJSON` times each request. `waitMs` is send → response headers (upload + processing), `readMs` is the body download, and `uploadBytes` is the payload size. `transcribeChunk` adds `totalMs` (including retries), `attempts` and `retryWaitMs` as `r.telemetry`. Each card shows these, plus realtime factor, provider, and output/thinking tokens for chat models. A "Speed ranking" table sorts the models by total time, and "Copy report" copies a Markdown table plus all the transcripts. "One model at a time" runs the requests one after another for fairer timing.
+  - The main Transcribe run shows elapsed time while it runs, and a summary at the end: total time, realtime factor, and average seconds per chunk. Each chunk chip's tooltip shows its own time.
   - Ticked models and models added by hand are saved in `transcriptor:compareModels`. The defaults are in `COMPARE_DEFAULT`.
   - The model catalog (`catalog`) feeds both the Model datalist and this checklist.
 - **Test model (1/5)** only processes the first `ceil(n/5)` chunks (10 → 2, 11 → 3).
