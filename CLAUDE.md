@@ -36,8 +36,11 @@ There is no `package.json`, bundler or framework, and that's intentional: the si
    - A final piece shorter than 30 s is merged into the previous chunk.
    - `nominal` is the timestamp shown in the transcript; `start`/`end` are the actual cut points.
 5. **Encode each chunk** to mono, 16 kHz, 32/48 kbps CBR MP3 (`prepareAudio`). That's about 1.2 MB per 5 minutes. Chunks are produced one by one, and transcription starts as soon as chunk 1 is ready.
-6. **Transcribe** (`workerLoop` → `transcribeChunk` → `callOpenRouter`):
-   - POSTs to `https://openrouter.ai/api/v1/chat/completions` with a text part plus `{type:"input_audio", input_audio:{data:<base64>, format:"mp3"}}`.
+6. **Transcribe** (`workerLoop` → `transcribeChunk` → `callOpenRouter`). There are two kinds of model:
+   - **Chat models with audio input** (Gemini, `callChat`): POST `/api/v1/chat/completions` with a prompt part plus `{type:"input_audio", input_audio:{data:<base64>, format:"mp3"}}`.
+   - **Speech-to-text models** (Nemotron, Scribe, Whisper, Deepgram, Voxtral, GPT transcribe…, `callTranscription`): POST `/api/v1/audio/transcriptions` with `{model, input_audio:{data, format:"mp3"}, language:"id"}` and read `json.text`. There's no prompt, so speaker labels are ignored. `language` is an ISO-639-1 code from `LANG_CODES`; it's omitted for unknown or mixed languages.
+   - `isSttModel(id)` picks the route. It checks `sttIds`, which starts as `KNOWN_STT` and has OpenRouter's live `?output_modalities=transcription` list added at startup, then falls back to a name regex.
+   - Both routes share `postJSON` for error handling, and both return `usage.cost` when the API sends it.
    - Runs 2 chunks in parallel by default (setting: 1 or 2).
    - Retries up to 3 times with exponential backoff on 408/429/5xx/network errors/empty replies. It honours `Retry-After`.
    - 400/401/402/404/413 fail immediately with a hint.
@@ -51,6 +54,12 @@ There is no `package.json`, bundler or framework, and that's intentional: the si
 
 ## Features to keep working
 
+- **Comparison tab** (`runComparison`):
+  - Cuts one snippet with ffmpeg (default 2 min; start time and 1/2/3 min are settable) and sends it to every ticked model, 3 at a time.
+  - Shows one card per model with time, word count, cost, loop warning, Copy, and "Use this model" (copies the model ID to the Transcribe tab).
+  - Has an audio player for the snippet.
+  - Ticked models and models added by hand are saved in `transcriptor:compareModels`. The defaults are in `COMPARE_DEFAULT`.
+  - The model catalog (`catalog`) feeds both the Model datalist and this checklist.
 - **Test model (1/5)** only processes the first `ceil(n/5)` chunks (10 → 2, 11 → 3).
 - **Retry failed chunks** re-sends only failed chunks. Their audio is kept in memory, so ffmpeg doesn't run again.
 - **Cancel** aborts fetches. If ffmpeg is mid-exec, it is terminated and reloaded next time.
@@ -87,6 +96,8 @@ There is no test suite in the repo. Changes have been checked with Playwright sc
 
 - intercept `https://openrouter.ai/**` with `page.route` and return fake `choices[0].message.content` (including 503s, 401s and looping text);
 - upload audio generated with system `ffmpeg` (e.g. `ffmpeg -f lavfi -i "sine=frequency=300:duration=200" -c:a aac test.m4a`; a 2-hour noise file for stress tests).
+
+Mock `https://openrouter.ai/api/v1/audio/transcriptions` as well, returning `{text, usage}`, and `https://openrouter.ai/api/v1/models**`.
 
 `window.__transcriber` exposes `trimOverlap`, `planChunks`, `findLoop` and `collapseLoops` for quick checks in `page.evaluate`.
 

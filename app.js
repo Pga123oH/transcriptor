@@ -2,13 +2,48 @@ import { FFmpeg } from "./vendor/ffmpeg/index.js";
 
 // ---------- constants ----------
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+const STT_URL = "https://openrouter.ai/api/v1/audio/transcriptions";
 const MODELS_URL = "https://openrouter.ai/api/v1/models";
+
+// Dedicated speech-to-text models use /audio/transcriptions instead of chat completions.
+// This list is a fallback; the live list from OpenRouter (output_modalities=transcription) is merged in at startup.
+const KNOWN_STT = [
+  { id: "nvidia/nemotron-3.5-transcribe", name: "NVIDIA Nemotron 3.5 Transcribe" },
+  { id: "elevenlabs/scribe-v2", name: "ElevenLabs Scribe v2" },
+  { id: "elevenlabs/scribe-v2-medical", name: "ElevenLabs Scribe v2 Medical" },
+  { id: "openai/whisper-large-v3-turbo", name: "Whisper Large V3 Turbo" },
+  { id: "openai/whisper-large-v3", name: "Whisper Large V3" },
+  { id: "openai/gpt-transcribe", name: "OpenAI GPT Transcribe" },
+  { id: "openai/gpt-4o-transcribe", name: "OpenAI GPT-4o Transcribe" },
+  { id: "openai/gpt-4o-mini-transcribe", name: "OpenAI GPT-4o Mini Transcribe" },
+  { id: "deepgram/nova-3", name: "Deepgram Nova-3" },
+  { id: "mistralai/voxtral-small-transcribe-3-0", name: "Mistral Voxtral Small Transcribe" },
+  { id: "mistralai/voxtral-mini-transcribe-3-0", name: "Mistral Voxtral Mini Transcribe" },
+  { id: "microsoft/mai-transcribe-2", name: "Microsoft MAI-Transcribe 2" },
+  { id: "openai/whisper-1", name: "OpenAI Whisper-1" },
+];
+const KNOWN_CHAT_AUDIO = [
+  { id: "google/gemini-2.5-flash", name: "Gemini 2.5 Flash" },
+  { id: "google/gemini-2.5-pro", name: "Gemini 2.5 Pro" },
+  { id: "google/gemini-2.5-flash-lite", name: "Gemini 2.5 Flash Lite" },
+];
+// Checked by default in the Comparison tab
+const COMPARE_DEFAULT = ["google/gemini-2.5-flash", "nvidia/nemotron-3.5-transcribe", "elevenlabs/scribe-v2",
+  "elevenlabs/scribe-v2-medical", "openai/whisper-large-v3-turbo", "openai/gpt-4o-mini-transcribe"];
+const sttIds = new Set(KNOWN_STT.map((m) => m.id));
+function isSttModel(id) {
+  return sttIds.has(id) || /transcribe|whisper|scribe|deepgram|nova-\d|parakeet|chirp|(^|[/-])(asr|stt)([/-]|$)/i.test(id);
+}
+// ISO-639-1 codes for the language field of the transcription endpoint (unknown / mixed → auto-detect)
+const LANG_CODES = { indonesian: "id", "bahasa indonesia": "id", english: "en", javanese: "jv", sundanese: "su", malay: "ms",
+  japanese: "ja", chinese: "zh", mandarin: "zh", korean: "ko", arabic: "ar", dutch: "nl", spanish: "es", french: "fr", german: "de" };
+const langCode = (name) => LANG_CODES[String(name).trim().toLowerCase()] || null;
 const OVERLAP_SEC = 5;          // each chunk starts 5 s before its nominal start
 const MIN_TAIL_SEC = 30;        // a final piece shorter than this is merged into the previous chunk
 const MAX_RETRIES = 3;          // retries after the first attempt
 const MIN_SPLIT_SEC = 60;       // a looping chunk longer than this is split in half and redone
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
-const LS = { key: "transcriptor:apiKey", settings: "transcriptor:settings", last: "transcriptor:last" };
+const LS = { key: "transcriptor:apiKey", settings: "transcriptor:settings", last: "transcriptor:last", cmp: "transcriptor:compareModels" };
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -21,7 +56,12 @@ const el = {
   progressCard: $("progressCard"), statusText: $("statusText"), statusPct: $("statusPct"),
   progress: $("progress"), chunkList: $("chunkList"), error: $("error"),
   resultCard: $("resultCard"), copy: $("copy"), download: $("download"), retry: $("retry"),
-  transcript: $("transcript"),
+  transcript: $("transcript"), modelKind: $("modelKind"),
+  tabs: document.querySelectorAll(".tab"),
+  cmpFile: $("cmpFile"), cmpStart: $("cmpStart"), cmpLen: $("cmpLen"), cmpLanguage: $("cmpLanguage"),
+  cmpModels: $("cmpModels"), cmpAdd: $("cmpAdd"), cmpAddBtn: $("cmpAddBtn"),
+  cmpRun: $("cmpRun"), cmpCancel: $("cmpCancel"), cmpStatus: $("cmpStatus"),
+  cmpResults: $("cmpResults"), cmpAudio: $("cmpAudio"), cmpCards: $("cmpCards"),
 };
 
 // ---------- storage helpers (never throw) ----------
@@ -201,24 +241,11 @@ class HttpError extends Error {
   constructor(msg, status, retryable, retryAfterMs) { super(msg); this.status = status; this.retryable = retryable; this.retryAfterMs = retryAfterMs; }
 }
 
-async function callOpenRouter(chunk, s, apiKey, signal) {
-  const body = {
-    model: s.model,
-    // No temperature override: Gemini loops more at low temperature.
-    // Cap output so a runaway loop stops early (~1,500 tokens per audio minute is several times normal speech).
-    max_tokens: Math.round(4000 + 1500 * (chunkSeconds(chunk) / 60)),
-    messages: [{
-      role: "user",
-      content: [
-        { type: "text", text: buildPrompt(s) },
-        { type: "input_audio", input_audio: { data: toBase64(chunk.audio), format: "mp3" } },
-      ],
-    }],
-  };
+async function postJSON(url, body, apiKey, signal) {
   const sig = combineSignals(signal, REQUEST_TIMEOUT_MS);
   let res;
   try {
-    res = await fetch(OPENROUTER_URL, {
+    res = await fetch(url, {
       method: "POST",
       headers: {
         "Authorization": "Bearer " + apiKey,
@@ -246,21 +273,53 @@ async function callOpenRouter(chunk, s, apiKey, signal) {
     let hint = "";
     if (status === 401) hint = " — check your API key.";
     else if (status === 402) hint = " — your OpenRouter credits are too low.";
-    else if (status === 400 || status === 404) hint = " — the model may not accept audio input. Try another model.";
+    else if (status === 400 || status === 404) hint = " — the model may not accept audio input (or the model name is wrong). Try another model.";
     else if (status === 413) hint = " — chunk too large; lower the chunk length.";
     throw new HttpError(`HTTP ${status}: ${msg}${hint}`, status, retryable, Number.isFinite(ra) && ra > 0 ? ra * 1000 : 0);
   }
+  return json || {};
+}
 
+async function callOpenRouter(chunk, s, apiKey, signal) {
+  return isSttModel(s.model) ? callTranscription(chunk, s, apiKey, signal) : callChat(chunk, s, apiKey, signal);
+}
+
+/** Dedicated speech-to-text models: POST /audio/transcriptions → { text, usage } */
+async function callTranscription(chunk, s, apiKey, signal) {
+  const body = { model: s.model, input_audio: { data: toBase64(chunk.audio), format: "mp3" } };
+  const code = langCode(s.language);
+  if (code) body.language = code;
+  const json = await postJSON(STT_URL, body, apiKey, signal);
+  const text = String(json.text ?? json.transcript ?? "").trim();
+  return { text, truncated: false, cost: json.usage?.cost };
+}
+
+/** Audio-capable chat models (Gemini etc.): prompt + input_audio part */
+async function callChat(chunk, s, apiKey, signal) {
+  const body = {
+    model: s.model,
+    // No temperature override: Gemini loops more at low temperature.
+    // Cap output so a runaway loop stops early (~1,500 tokens per audio minute is several times normal speech).
+    max_tokens: Math.round(4000 + 1500 * (chunkSeconds(chunk) / 60)),
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: buildPrompt(s) },
+        { type: "input_audio", input_audio: { data: toBase64(chunk.audio), format: "mp3" } },
+      ],
+    }],
+  };
+  const json = await postJSON(OPENROUTER_URL, body, apiKey, signal);
   const choice = json?.choices?.[0];
   let content = choice?.message?.content;
   if (Array.isArray(content)) content = content.map((p) => p?.text || "").join("");
   content = cleanModelText(content);
   const finish = choice?.finish_reason || choice?.native_finish_reason || "";
   if (!content && finish !== "stop") throw new HttpError("Model returned an empty response", 200, true);
-  return { text: content, truncated: /length|max_tokens/i.test(String(finish)) };
+  return { text: content, truncated: /length|max_tokens/i.test(String(finish)), cost: json.usage?.cost };
 }
 
-async function transcribeChunk(chunk, s, apiKey, signal) {
+async function transcribeChunk(chunk, s, apiKey, signal, onUpdate = render) {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     chunk.attempts = attempt + 1;
     try {
@@ -271,7 +330,7 @@ async function transcribeChunk(chunk, s, apiKey, signal) {
       if (!(e instanceof HttpError) || !e.retryable || attempt === MAX_RETRIES) throw e;
       const wait = e.retryAfterMs || 2000 * 2 ** attempt + Math.random() * 1000;
       chunk.error = `${e.message} — retrying (${attempt + 1}/${MAX_RETRIES})…`;
-      render();
+      onUpdate();
       await sleep(wait, signal);
     }
   }
@@ -447,6 +506,7 @@ function persist() {
 function setBusy(busy) {
   el.start.disabled = busy;
   el.test.disabled = busy;
+  el.cmpRun.disabled = busy;
   el.file.disabled = busy;
   el.cancel.hidden = !busy;
   el.retry.disabled = busy;
@@ -626,23 +686,222 @@ function cancel() {
   if (!job.prepDone) killFFmpeg();
 }
 
-// ---------- model list (optional nicety) ----------
-async function loadModelList() {
-  try {
-    const res = await fetch(MODELS_URL);
-    if (!res.ok) return;
-    const { data } = await res.json();
-    const audio = (data || []).filter((m) => (m.architecture?.input_modalities || []).includes("audio"));
-    audio.sort((a, b) => (Number(a.pricing?.prompt) || 0) - (Number(b.pricing?.prompt) || 0));
-    el.models.innerHTML = "";
-    for (const m of audio) {
-      const o = document.createElement("option");
-      o.value = m.id;
-      o.label = m.name || m.id;
-      el.models.appendChild(o);
-    }
-  } catch { /* offline or blocked — the field is free text anyway */ }
+// ---------- model catalog ----------
+/** id → { id, name, stt } ; seeded with known models, extended with OpenRouter's live list */
+const catalog = new Map();
+for (const m of KNOWN_CHAT_AUDIO) catalog.set(m.id, { ...m, stt: false });
+for (const m of KNOWN_STT) catalog.set(m.id, { ...m, stt: true });
+
+function refreshModelUI() {
+  el.models.innerHTML = "";
+  const list = [...catalog.values()].sort((x, y) => Number(x.stt) - Number(y.stt) || x.name.localeCompare(y.name));
+  for (const m of list) {
+    const o = document.createElement("option");
+    o.value = m.id;
+    o.label = `${m.name} · ${m.stt ? "transcription" : "chat"}`;
+    el.models.appendChild(o);
+  }
+  renderCompareModels();
+  showModelKind();
 }
+function showModelKind() {
+  const id = el.model.value.trim();
+  el.modelKind.textContent = !id ? "" : isSttModel(id)
+    ? "Transcription model — sent to OpenRouter's speech-to-text endpoint. The speaker-label option is ignored."
+    : "Chat model with audio input — uses the transcription prompt.";
+}
+
+async function loadModelList() {
+  const get = async (url) => { try { const r = await fetch(url); return r.ok ? (await r.json()).data || [] : []; } catch { return []; } };
+  const [all, stt] = await Promise.all([get(MODELS_URL), get(MODELS_URL + "?output_modalities=transcription")]);
+  for (const m of all) {
+    if ((m.architecture?.input_modalities || []).includes("audio") && !catalog.has(m.id)) catalog.set(m.id, { id: m.id, name: m.name || m.id, stt: false });
+  }
+  for (const m of stt) {
+    sttIds.add(m.id);
+    catalog.set(m.id, { id: m.id, name: m.name || m.id, stt: true });
+  }
+  refreshModelUI();
+}
+
+// ---------- tabs ----------
+function showTab(id) {
+  for (const b of el.tabs) {
+    const on = b.dataset.tab === id;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", String(on));
+    $(b.dataset.tab).hidden = !on;
+  }
+}
+for (const b of el.tabs) b.addEventListener("click", () => {
+  if (b.dataset.tab === "tabCompare" && !cmp.running) el.cmpLanguage.value = el.language.value;
+  showTab(b.dataset.tab);
+});
+
+// ---------- comparison ----------
+const cmp = { running: false, abort: null, audioUrl: null, selected: new Set(), extra: [] };
+try {
+  const saved = JSON.parse(store.get(LS.cmp) || "null");
+  if (saved) { cmp.selected = new Set(saved.selected || []); cmp.extra = saved.extra || []; }
+  else cmp.selected = new Set(COMPARE_DEFAULT);
+} catch { cmp.selected = new Set(COMPARE_DEFAULT); }
+for (const id of cmp.extra) if (!catalog.has(id)) catalog.set(id, { id, name: id, stt: isSttModel(id) });
+const saveCmp = () => store.set(LS.cmp, JSON.stringify({ selected: [...cmp.selected], extra: cmp.extra }));
+
+function renderCompareModels() {
+  el.cmpModels.innerHTML = "";
+  const list = [...catalog.values()].sort((x, y) =>
+    Number(cmp.selected.has(y.id)) - Number(cmp.selected.has(x.id)) || Number(x.stt) - Number(y.stt) || x.name.localeCompare(y.name));
+  for (const m of list) {
+    const row = document.createElement("label");
+    const cb = Object.assign(document.createElement("input"), { type: "checkbox", checked: cmp.selected.has(m.id) });
+    cb.addEventListener("change", () => { cb.checked ? cmp.selected.add(m.id) : cmp.selected.delete(m.id); saveCmp(); });
+    const name = document.createElement("span");
+    name.className = "mname";
+    name.textContent = m.name;
+    const idEl = document.createElement("span");
+    idEl.className = "mid";
+    idEl.textContent = m.id;
+    name.appendChild(idEl);
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = m.stt ? "transcription" : "chat";
+    row.append(cb, name, tag);
+    el.cmpModels.appendChild(row);
+  }
+}
+
+function parseMmSs(v) {
+  const parts = String(v).trim().split(":").map((x) => Number(x));
+  if (parts.some((x) => !Number.isFinite(x) || x < 0)) return null;
+  return parts.reduce((acc, x) => acc * 60 + x, 0);
+}
+
+function cmpCard(model) {
+  const card = document.createElement("article");
+  card.className = "cmp-card";
+  const m = catalog.get(model) || { name: model };
+  card.innerHTML = `<h3></h3><div class="mid"></div><div class="meta">Waiting…</div><div class="warn" hidden></div><div class="err" hidden></div><pre class="transcript" hidden></pre>
+    <div class="actions wrap" hidden><button type="button" data-act="copy">Copy</button><button type="button" data-act="use">Use this model</button></div>`;
+  card.querySelector("h3").textContent = m.name;
+  card.querySelector(".mid").textContent = model;
+  card.querySelector('[data-act="copy"]').addEventListener("click", async (e) => {
+    try { await navigator.clipboard.writeText(card.querySelector("pre").textContent); e.target.textContent = "Copied ✓"; } catch { /* ignore */ }
+    setTimeout(() => (e.target.textContent = "Copy"), 1500);
+  });
+  card.querySelector('[data-act="use"]').addEventListener("click", () => {
+    el.model.value = model; saveSettings(); showModelKind(); showTab("tabMain");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  });
+  el.cmpCards.appendChild(card);
+  return card;
+}
+
+async function runComparison() {
+  const apiKey = el.apiKey.value.trim();
+  if (!apiKey) { alert("Paste your OpenRouter API key first."); el.apiKey.focus(); return; }
+  store.set(LS.key, apiKey);
+  const file = el.cmpFile.files?.[0] || el.file.files?.[0];
+  if (!file) { alert("Choose an audio file first."); return; }
+  const models = [...cmp.selected];
+  if (!models.length) { alert("Tick at least one model."); return; }
+  const from = parseMmSs(el.cmpStart.value);
+  if (from == null) { alert("Start time should look like 12:30 (minutes:seconds)."); el.cmpStart.focus(); return; }
+  if (job?.running) { alert("Wait for the current transcription to finish first."); return; }
+  const len = Number(el.cmpLen.value) || 120;
+
+  cmp.running = true;
+  cmp.abort = new AbortController();
+  const signal = cmp.abort.signal;
+  el.cmpRun.disabled = el.start.disabled = el.test.disabled = true;
+  el.cmpCancel.hidden = false;
+  el.cmpCards.innerHTML = "";
+  el.cmpResults.hidden = true;
+  await requestWakeLock();
+
+  try {
+    el.cmpStatus.textContent = "Cutting the snippet…";
+    const f = await getFFmpeg();
+    el.cmpStatus.textContent = "Cutting the snippet…";
+    const input = await attachInput(f, file);
+    let audio;
+    try {
+      await run(f, ["-hide_banner", "-ss", String(from), "-i", input.path, "-t", String(len), "-vn", "-ac", "1", "-ar", "16000",
+        "-c:a", "libmp3lame", "-b:a", "32k", "-map_metadata", "-1", "/cmp.mp3"]);
+      audio = await f.readFile("/cmp.mp3");
+      await safeDelete(f, "/cmp.mp3");
+    } finally { await input.cleanup(); }
+    if (audio.length < 2000) throw new Error("No audio at that start time — is it past the end of the file?");
+    const realLen = Math.round((audio.length * 8) / 32000);
+
+    if (cmp.audioUrl) URL.revokeObjectURL(cmp.audioUrl);
+    cmp.audioUrl = URL.createObjectURL(new Blob([audio], { type: "audio/mpeg" }));
+    el.cmpAudio.src = cmp.audioUrl;
+    el.cmpResults.hidden = false;
+
+    const settings = { ...readSettings(), language: el.cmpLanguage.value.trim() || "Indonesian" };
+    const cards = new Map(models.map((m) => [m, cmpCard(m)]));
+    let finished = 0;
+    const status = () => { el.cmpStatus.textContent = `Snippet ${fmtTime(from)}–${fmtTime(from + realLen)} · ${finished} of ${models.length} models done`; };
+    status();
+
+    const queue = [...models];
+    const worker = async () => {
+      while (queue.length && !signal.aborted) {
+        const model = queue.shift();
+        const card = cards.get(model);
+        const meta = card.querySelector(".meta"), warn = card.querySelector(".warn"), err = card.querySelector(".err"), pre = card.querySelector("pre");
+        const piece = { audio, start: 0, end: realLen, attempts: 0, error: "" };
+        meta.textContent = "Transcribing…";
+        const t0 = performance.now();
+        try {
+          const r = await transcribeChunk(piece, { ...settings, model }, apiKey, signal, () => { meta.textContent = piece.error; });
+          const secs = (performance.now() - t0) / 1000;
+          const loop = findLoop(r.text);
+          const text = loop ? collapseLoops(r.text) : r.text;
+          const words = (text.match(/\S+/g) || []).length;
+          meta.textContent = [`${secs.toFixed(1)} s`, `${words} words`, r.cost != null ? `$${Number(r.cost).toFixed(4)}` : null].filter(Boolean).join(" · ");
+          const warns = [];
+          if (loop) warns.push(`Got stuck repeating a phrase (${loop.reps}×) — repeats removed.`);
+          if (r.truncated) warns.push("Output was cut off.");
+          if (!text) warns.push("Returned no text.");
+          warn.hidden = !warns.length; warn.textContent = warns.join(" ");
+          pre.hidden = !text; pre.textContent = text;
+          card.querySelector(".actions").hidden = false;
+        } catch (e) {
+          if (signal.aborted) { meta.textContent = "Cancelled"; return; }
+          card.classList.add("failed");
+          meta.textContent = "Failed";
+          err.hidden = false; err.textContent = friendlyError(e);
+        }
+        finished++; status();
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+    if (signal.aborted) el.cmpStatus.textContent = "Cancelled";
+    else el.cmpStatus.textContent += " — read them while listening to the snippet above, then tap “Use this model” on the best one.";
+  } catch (e) {
+    if (!signal.aborted) { killFFmpeg(); el.cmpStatus.textContent = friendlyError(e); }
+    else el.cmpStatus.textContent = "Cancelled";
+  } finally {
+    cmp.running = false;
+    el.cmpRun.disabled = el.start.disabled = el.test.disabled = false;
+    el.cmpCancel.hidden = true;
+    releaseWakeLock();
+  }
+}
+
+el.cmpRun.addEventListener("click", runComparison);
+el.cmpCancel.addEventListener("click", () => { cmp.abort?.abort(); });
+el.cmpAddBtn.addEventListener("click", () => {
+  const id = el.cmpAdd.value.trim();
+  if (!id) return;
+  if (!catalog.has(id)) { catalog.set(id, { id, name: id, stt: isSttModel(id) }); cmp.extra.push(id); }
+  cmp.selected.add(id); saveCmp();
+  el.cmpAdd.value = "";
+  refreshModelUI();
+});
+el.model.addEventListener("input", showModelKind);
 
 // ---------- events ----------
 el.toggleKey.addEventListener("click", () => {
@@ -687,10 +946,11 @@ el.download.addEventListener("click", () => {
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 });
-window.addEventListener("beforeunload", (e) => { if (job?.running) { e.preventDefault(); e.returnValue = ""; } });
+window.addEventListener("beforeunload", (e) => { if (job?.running || cmp.running) { e.preventDefault(); e.returnValue = ""; } });
 
 // ---------- init ----------
 loadSettings();
+refreshModelUI();
 loadModelList();
 try {
   const last = JSON.parse(store.get(LS.last) || "null");

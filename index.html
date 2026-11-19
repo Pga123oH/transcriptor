@@ -14,6 +14,11 @@
     <p class="muted">Long voice notes → full transcript. Runs in your browser; audio goes only to OpenRouter.</p>
   </header>
 
+  <nav class="tabs" role="tablist">
+    <button id="tabMainBtn" type="button" role="tab" class="tab active" data-tab="tabMain" aria-selected="true">Transcribe</button>
+    <button id="tabCompareBtn" type="button" role="tab" class="tab" data-tab="tabCompare" aria-selected="false">Comparison</button>
+  </nav>
+
   <section class="card">
     <label for="apiKey">OpenRouter API key</label>
     <div class="row">
@@ -23,6 +28,7 @@
     <p class="hint">Saved in this browser's localStorage only. <button id="clearKey" type="button" class="link">Forget key</button></p>
   </section>
 
+  <div id="tabMain">
   <section class="card">
     <label for="file">Audio file</label>
     <input id="file" type="file" accept="audio/*,.m4a,.mp3,.wav,.ogg,.opus,.oga,.aac,.flac,.webm,.amr,.3gp,.mp4">
@@ -43,6 +49,7 @@
         <datalist id="models"></datalist>
       </div>
     </div>
+    <p id="modelKind" class="hint"></p>
 
     <details>
       <summary>More settings</summary>
@@ -89,6 +96,47 @@
     </div>
     <pre id="transcript" class="transcript"></pre>
   </section>
+  </div>
+
+  <div id="tabCompare" hidden>
+  <section class="card">
+    <p class="hint first">Send the same short snippet to several models and read their transcripts side by side. Each model is billed for the snippet only (2 min ≈ a few cents in total).</p>
+    <label for="cmpFile">Audio file</label>
+    <input id="cmpFile" type="file" accept="audio/*,.m4a,.mp3,.wav,.ogg,.opus,.oga,.aac,.flac,.webm,.amr,.3gp,.mp4">
+    <p class="hint">Uses the file from the Transcribe tab if you leave this empty.</p>
+    <div class="grid three">
+      <div>
+        <label for="cmpStart">Start at (mm:ss)</label>
+        <input id="cmpStart" inputmode="numeric" value="0:00">
+      </div>
+      <div>
+        <label for="cmpLen">Snippet length</label>
+        <select id="cmpLen"><option value="60">1 min</option><option value="120" selected>2 min</option><option value="180">3 min</option></select>
+      </div>
+      <div>
+        <label for="cmpLanguage">Language</label>
+        <input id="cmpLanguage" list="languages" value="Indonesian">
+      </div>
+    </div>
+    <label class="spaced">Models</label>
+    <div id="cmpModels" class="model-list"></div>
+    <div class="row spaced">
+      <input id="cmpAdd" list="models" spellcheck="false" placeholder="Add another model id, e.g. provider/model">
+      <button id="cmpAddBtn" type="button">Add</button>
+    </div>
+    <div class="actions">
+      <button id="cmpRun" type="button" class="primary">Compare</button>
+      <button id="cmpCancel" type="button" class="ghost" hidden>Cancel</button>
+    </div>
+    <p id="cmpStatus" class="hint"></p>
+  </section>
+
+  <section id="cmpResults" class="card" hidden>
+    <label>Snippet (listen while you compare)</label>
+    <audio id="cmpAudio" controls preload="metadata"></audio>
+    <div id="cmpCards" class="cmp-cards"></div>
+  </section>
+  </div>
 
   <footer class="muted small">Keep this tab open and the screen on while it works. Large files on phones can run out of memory — use a desktop browser if that happens.</footer>
 </main>

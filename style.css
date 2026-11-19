@@ -26,6 +26,7 @@
   }
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
@@ -104,3 +105,29 @@ progress { width: 100%; height: 10px; accent-color: var(--accent); }
   overflow: auto;
 }
 footer { margin-top: 8px; }
+
+.tabs { display: flex; gap: 4px; padding: 4px; margin-bottom: 16px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
+.tab { flex: 1; border: 0; background: transparent; font-weight: 600; color: var(--muted); }
+.tab.active { background: var(--accent); color: var(--accent-text); }
+.hint.first { margin: 0 0 12px; }
+.spaced { margin-top: 12px; }
+@media (min-width: 560px) { .grid.three { grid-template-columns: 1fr 1fr 1fr; } }
+.model-list { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 8px; max-height: 320px; overflow: auto; }
+.model-list label { flex: none; display: flex; align-items: center; gap: 10px; margin: 0; padding: 10px 12px; font-weight: 400; border-bottom: 1px solid var(--border); min-height: 44px; cursor: pointer; }
+.model-list label:last-child { border-bottom: 0; }
+.model-list input { width: 20px; height: 20px; flex: none; }
+.model-list .mname { flex: 1; min-width: 0; }
+.model-list .mid { display: block; font-size: 0.75rem; color: var(--muted); overflow-wrap: anywhere; }
+.tag { font-size: 0.7rem; padding: 2px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); flex: none; }
+audio { width: 100%; margin-bottom: 12px; }
+.cmp-cards { display: grid; grid-template-columns: 1fr; gap: 12px; }
+@media (min-width: 720px) { .cmp-cards { grid-template-columns: 1fr 1fr; } }
+.cmp-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px; min-width: 0; }
+.cmp-card.failed { border-color: var(--bad); }
+.cmp-card h3 { font-size: 1rem; margin: 0; }
+.cmp-card .mid { font-size: 0.75rem; color: var(--muted); overflow-wrap: anywhere; }
+.cmp-card .meta { font-size: 0.85rem; color: var(--muted); margin: 6px 0; }
+.cmp-card .warn { color: var(--warn); font-size: 0.85rem; margin: 6px 0; }
+.cmp-card .err { color: var(--bad); font-size: 0.85rem; white-space: pre-wrap; margin: 6px 0; }
+.cmp-card pre { max-height: 40vh; overflow: auto; margin: 8px 0; }
+.cmp-card .actions { margin-top: 8px; }

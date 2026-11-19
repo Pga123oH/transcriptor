@@ -12,6 +12,15 @@ Everything runs in your browser: the audio is split and converted locally with f
 4. The results are stitched together. Words repeated in the overlap are trimmed, and a `[hh:mm:ss]` marker starts each chunk.
 5. You can copy the transcript or download it as a .txt file. The last transcript is also kept in localStorage in case the tab reloads.
 
+## Models
+
+There are two kinds of model, and the app picks the right OpenRouter endpoint automatically:
+
+- **Chat models with audio input**, such as Gemini 2.5 Flash/Pro, get the strict "transcribe verbatim" prompt. They can label speakers.
+- **Speech-to-text models** go through `/api/v1/audio/transcriptions`. These include NVIDIA Nemotron 3.5 Transcribe, ElevenLabs Scribe v2 (and Scribe v2 Medical), Whisper Large V3 (Turbo), OpenAI GPT/GPT-4o(-mini) Transcribe, Deepgram Nova-3, Mistral Voxtral, and Microsoft MAI-Transcribe 2. The language is sent as an ISO code (Indonesian → `id`).
+
+**Comparison tab:** pick a file, a start time and a 1–3 minute length, then tick the models you want. Each model transcribes the same snippet, and the results show side by side with time, word count, cost and loop warnings, next to a player for the snippet. When you've found the best one, "Use this model" sets it in the Transcribe tab.
+
 ## Chunk length
 
 Different models accept different amounts of audio, so the default uses the smallest limit that matters:
