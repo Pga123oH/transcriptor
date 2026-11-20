@@ -131,6 +131,7 @@
       <button id="cmpCancel" type="button" class="ghost" hidden>Cancel</button>
     </div>
     <p id="cmpStatus" class="hint"></p>
+    <p id="cmpLast" class="hint" hidden>Last benchmark: <span id="cmpLastWhen"></span> · <button id="cmpLastDl" type="button" class="link">download .md</button> · <button id="cmpLastCopy" type="button" class="link">copy</button></p>
   </section>
 
   <section id="cmpResults" class="card" hidden>
@@ -140,7 +141,11 @@
       <label>Speed ranking</label>
       <div class="table-scroll"><table id="cmpRank" class="rank"></table></div>
       <p class="hint">Total = from sending until the transcript arrived, including retries. Realtime = seconds of audio handled per second (higher is faster). Server = upload + processing until the reply started.</p>
-      <div class="actions wrap"><button id="cmpReport" type="button">Copy report</button></div>
+      <div class="actions wrap">
+        <button id="cmpReport" type="button">Copy report</button>
+        <button id="cmpDlMd" type="button">Download .md</button>
+        <button id="cmpDlTxt" type="button">Download .txt</button>
+      </div>
     </div>
     <div id="cmpCards" class="cmp-cards"></div>
   </section>

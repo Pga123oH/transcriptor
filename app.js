@@ -43,7 +43,8 @@ const MIN_TAIL_SEC = 30;        // a final piece shorter than this is merged int
 const MAX_RETRIES = 3;          // retries after the first attempt
 const MIN_SPLIT_SEC = 60;       // a looping chunk longer than this is split in half and redone
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
-const LS = { key: "transcriptor:apiKey", settings: "transcriptor:settings", last: "transcriptor:last", cmp: "transcriptor:compareModels" };
+const LS = { key: "transcriptor:apiKey", settings: "transcriptor:settings", last: "transcriptor:last", cmp: "transcriptor:compareModels",
+  report: "transcriptor:lastReport" };
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -63,6 +64,8 @@ const el = {
   cmpRun: $("cmpRun"), cmpCancel: $("cmpCancel"), cmpStatus: $("cmpStatus"),
   cmpResults: $("cmpResults"), cmpAudio: $("cmpAudio"), cmpCards: $("cmpCards"),
   cmpSerial: $("cmpSerial"), cmpRankWrap: $("cmpRankWrap"), cmpRank: $("cmpRank"), cmpReport: $("cmpReport"),
+  cmpDlMd: $("cmpDlMd"), cmpDlTxt: $("cmpDlTxt"), cmpLast: $("cmpLast"), cmpLastWhen: $("cmpLastWhen"),
+  cmpLastDl: $("cmpLastDl"), cmpLastCopy: $("cmpLastCopy"),
 };
 
 // ---------- storage helpers (never throw) ----------
@@ -890,12 +893,36 @@ function renderRanking() {
   el.cmpRankWrap.hidden = false;
 }
 
+function reportFileName(ext) {
+  const m = cmp.meta || {};
+  const base = (m.fileName || "audio").replace(/\.[^.]+$/, "").replace(/[^\p{L}\p{N}_-]+/gu, "-").slice(0, 40);
+  const d = m.when || new Date();
+  const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}-` +
+    `${String(d.getHours()).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}`;
+  return `benchmark-${base}-${stamp}.${ext}`;
+}
+/** Keep the latest report so it survives a reload (phones often reload background tabs). */
+function saveLastReport() {
+  const text = buildReport();
+  store.set(LS.report, JSON.stringify({ text, name: reportFileName("md"), when: Date.now() }));
+  showLastReport();
+}
+function loadLastReport() {
+  try { return JSON.parse(store.get(LS.report) || "null"); } catch { return null; }
+}
+function showLastReport() {
+  const r = loadLastReport();
+  el.cmpLast.hidden = !r;
+  if (r) el.cmpLastWhen.textContent = new Date(r.when).toLocaleString();
+}
+
 function buildReport() {
   const m = cmp.meta || {};
   const rows = sortedRows();
   const f = (x, d = 2) => (x == null || Number.isNaN(x) ? "" : Number(x).toFixed(d));
   const lines = [
     "# Transcription model comparison",
+    `File: ${m.fileName || "?"}`,
     `Snippet ${fmtTime(m.from || 0)}–${fmtTime((m.from || 0) + (m.realLen || 0))} (${m.realLen} s), language ${m.language}, ` +
       `${m.serial ? "one model at a time" : "3 models in parallel"}, ${m.when ? m.when.toISOString() : ""}`,
     "",
@@ -1012,10 +1039,10 @@ async function runComparison() {
           err.hidden = false; err.textContent = friendlyError(e);
           Object.assign(row, { status: "failed", totalS: (performance.now() - t0) / 1000, error: friendlyError(e) });
         }
-        finished++; status(); renderRanking();
+        finished++; status(); renderRanking(); saveLastReport();
       }
     };
-    cmp.meta = { from, realLen, language: settings.language, serial: el.cmpSerial.checked, when: new Date() };
+    cmp.meta = { from, realLen, language: settings.language, serial: el.cmpSerial.checked, when: new Date(), fileName: file.name };
     await Promise.all(Array.from({ length: el.cmpSerial.checked ? 1 : 3 }, worker));
     if (signal.aborted) el.cmpStatus.textContent = "Cancelled";
     else el.cmpStatus.textContent += " — read them while listening to the snippet above, then tap “Use this model” on the best one.";
@@ -1031,6 +1058,16 @@ async function runComparison() {
 }
 
 el.cmpRun.addEventListener("click", runComparison);
+el.cmpDlMd.addEventListener("click", () => saveFile(reportFileName("md"), buildReport(), "text/markdown"));
+el.cmpDlTxt.addEventListener("click", () => saveFile(reportFileName("txt"), buildReport()));
+el.cmpLastDl.addEventListener("click", () => { const r = loadLastReport(); if (r) saveFile(r.name, r.text, "text/markdown"); });
+el.cmpLastCopy.addEventListener("click", async () => {
+  const r = loadLastReport();
+  if (!r) return;
+  try { await navigator.clipboard.writeText(r.text); el.cmpLastCopy.textContent = "copied ✓"; } catch { el.cmpLastCopy.textContent = "couldn't copy"; }
+  setTimeout(() => (el.cmpLastCopy.textContent = "copy"), 2000);
+});
+showLastReport();
 el.cmpReport.addEventListener("click", async () => {
   const text = buildReport();
   try { await navigator.clipboard.writeText(text); el.cmpReport.textContent = "Copied ✓ — paste it anywhere"; }
@@ -1095,13 +1132,14 @@ el.copy.addEventListener("click", async () => {
   el.copy.textContent = "Copied ✓";
   setTimeout(() => (el.copy.textContent = "Copy all"), 1500);
 });
-el.download.addEventListener("click", () => {
-  const text = el.transcript.textContent.replace(/\n/g, "\r\n");
-  const name = ((job?.fileName || "transcript").replace(/\.[^.]+$/, "")) + ".txt";
-  const url = URL.createObjectURL(new Blob(["﻿" + text], { type: "text/plain;charset=utf-8" }));
+function saveFile(name, text, type = "text/plain") {
+  const url = URL.createObjectURL(new Blob(["\ufeff" + text.replace(/\r?\n/g, "\r\n")], { type: type + ";charset=utf-8" }));
   const a = Object.assign(document.createElement("a"), { href: url, download: name });
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+el.download.addEventListener("click", () => {
+  saveFile(((job?.fileName || "transcript").replace(/\.[^.]+$/, "")) + ".txt", el.transcript.textContent);
 });
 window.addEventListener("beforeunload", (e) => { if (job?.running || cmp.running) { e.preventDefault(); e.returnValue = ""; } });
 
