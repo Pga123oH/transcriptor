@@ -143,3 +143,5 @@ audio { width: 100%; margin-bottom: 12px; }
 .cmp-card dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .rank td:nth-child(2) { white-space: normal; min-width: 110px; }
 .rank th, .rank td { padding: 6px 5px; }
+
+.spaced-sm { margin-top: 8px; }

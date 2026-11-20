@@ -73,7 +73,7 @@ There is no `package.json`, bundler or framework, and that's intentional: the si
   - A screen wake lock is held while running.
   - `beforeunload` warns while a job is running.
   - Memory errors are turned into a "use a desktop browser" message (`friendlyError`).
-- **Model list**: suggestions are fetched from `https://openrouter.ai/api/v1/models`, filtered to models with `audio` in `input_modalities`. The field stays free text.
+- **Model list**: suggestions are fetched from `https://openrouter.ai/api/v1/models`, filtered to models with `audio` in `input_modalities`, and merged into `catalog`. The main tab shows them in a grouped dropdown (`#modelSelect`: transcription models, then chat models). Its "Other (type a model ID)…" option shows the `#model` text input. `#model` always holds the chosen ID; call `syncModelSelect()` after setting it in code.
 
 ## Constraints and decisions
 

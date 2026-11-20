@@ -49,7 +49,7 @@ const $ = (id) => document.getElementById(id);
 const el = {
   apiKey: $("apiKey"), toggleKey: $("toggleKey"), clearKey: $("clearKey"),
   file: $("file"), fileInfo: $("fileInfo"),
-  language: $("language"), model: $("model"), models: $("models"),
+  language: $("language"), model: $("model"), models: $("models"), modelSelect: $("modelSelect"),
   chunkMin: $("chunkMin"), concurrency: $("concurrency"), bitrate: $("bitrate"),
   speakers: $("speakers"), timestamps: $("timestamps"),
   start: $("start"), test: $("test"), cancel: $("cancel"),
@@ -745,8 +745,32 @@ function refreshModelUI() {
     o.label = `${m.name} · ${m.stt ? "transcription" : "chat"}`;
     el.models.appendChild(o);
   }
+  fillModelSelect();
   renderCompareModels();
   showModelKind();
+}
+
+/** Main-tab dropdown: every known model, grouped, plus "Other" for a typed ID (kept in the hidden #model input). */
+function fillModelSelect() {
+  const sel = el.modelSelect;
+  sel.innerHTML = "";
+  const groups = [["Transcription models", true], ["Chat models with audio", false]];
+  for (const [label, stt] of groups) {
+    const g = document.createElement("optgroup");
+    g.label = label;
+    for (const m of [...catalog.values()].filter((x) => x.stt === stt).sort((x, y) => x.name.localeCompare(y.name))) {
+      g.appendChild(new Option(m.name, m.id));
+    }
+    sel.appendChild(g);
+  }
+  sel.appendChild(new Option("Other (type a model ID)…", "__custom"));
+  syncModelSelect();
+}
+function syncModelSelect() {
+  const id = el.model.value.trim();
+  const known = catalog.has(id);
+  el.modelSelect.value = known ? id : "__custom";
+  el.model.hidden = known;
 }
 function showModelKind() {
   const id = el.model.value.trim();
@@ -834,7 +858,7 @@ function cmpCard(model) {
     setTimeout(() => (e.target.textContent = "Copy"), 1500);
   });
   card.querySelector('[data-act="use"]').addEventListener("click", () => {
-    el.model.value = model; saveSettings(); showModelKind(); showTab("tabMain");
+    el.model.value = model; syncModelSelect(); saveSettings(); showModelKind(); showTab("tabMain");
     window.scrollTo({ top: 0, behavior: "smooth" });
   });
   el.cmpCards.appendChild(card);
@@ -1023,6 +1047,18 @@ el.cmpAddBtn.addEventListener("click", () => {
   refreshModelUI();
 });
 el.model.addEventListener("input", showModelKind);
+el.modelSelect.addEventListener("change", () => {
+  if (el.modelSelect.value === "__custom") {
+    el.model.hidden = false;
+    el.model.value = "";
+    el.model.focus();
+  } else {
+    el.model.value = el.modelSelect.value;
+    el.model.hidden = true;
+    saveSettings();
+  }
+  showModelKind();
+});
 
 // ---------- events ----------
 el.toggleKey.addEventListener("click", () => {

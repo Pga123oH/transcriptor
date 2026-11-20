@@ -45,7 +45,8 @@
       </div>
       <div>
         <label for="model">Model</label>
-        <input id="model" list="models" spellcheck="false" value="google/gemini-2.5-flash">
+        <select id="modelSelect"></select>
+        <input id="model" class="spaced-sm" list="models" spellcheck="false" value="google/gemini-2.5-flash" placeholder="provider/model-id" hidden>
         <datalist id="models"></datalist>
       </div>
     </div>
